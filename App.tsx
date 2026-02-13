@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState, memo, useEffect } from 'react';
+import React, { useCallback, useRef, useState, memo, useEffect, createContext, useContext } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -13,6 +13,7 @@ import {
   ViewToken,
   Alert,
   Platform,
+  Animated,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -108,6 +109,23 @@ const VIEWABILITY_CONFIG = {
   itemVisiblePercentThreshold: 70,
 };
 
+type TimerContextValue = {
+  remainingCodesByIndex: number[];
+  onWeGoPress: (reelIndex: number) => void;
+  showTimerOverlay: boolean;
+  code: string;
+  secondsLeft: number;
+  currentRouteName: string;
+};
+
+const TimerContext = createContext<TimerContextValue | null>(null);
+
+function useTimer() {
+  const ctx = useContext(TimerContext);
+  if (!ctx) throw new Error('useTimer must be used within TimerProvider');
+  return ctx;
+}
+
 function generateSixDigitCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
@@ -118,66 +136,75 @@ function formatTimer(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+function LostFeedbackOverlay({ onDismiss }: { onDismiss: () => void }) {
+  const redHeartOpacity = useRef(new Animated.Value(1)).current;
+  const blackHeartOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const duration = 600;
+    Animated.parallel([
+      Animated.timing(redHeartOpacity, {
+        toValue: 0,
+        duration,
+        useNativeDriver: true,
+      }),
+      Animated.timing(blackHeartOpacity, {
+        toValue: 1,
+        duration,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [redHeartOpacity, blackHeartOpacity]);
+
+  return (
+    <View style={styles.lostFeedbackOverlay} pointerEvents="box-none">
+      <View style={styles.lostFeedbackCard}>
+        <Text style={styles.lostFeedbackPoints}>You lost 5 points (-5)</Text>
+        <Text style={styles.lostFeedbackHeartLabel}>Lost one heart</Text>
+        <View style={styles.lostFeedbackHeartsRow}>
+          <View style={styles.lostFeedbackHeartSlot}>
+            <Animated.View
+              style={[styles.lostFeedbackHeartPixel, { opacity: redHeartOpacity }]}
+              pointerEvents="none"
+            >
+              <Ionicons name="heart" size={32} color="#ef4444" />
+            </Animated.View>
+            <Animated.View
+              style={[
+                styles.lostFeedbackHeartPixel,
+                styles.lostFeedbackHeartBlack,
+                { opacity: blackHeartOpacity },
+              ]}
+              pointerEvents="none"
+            >
+              <Ionicons name="heart" size={32} color="#1a1a1a" />
+            </Animated.View>
+          </View>
+          <View style={styles.lostFeedbackHeartPixelStatic}>
+            <Ionicons name="heart" size={32} color="#ef4444" />
+          </View>
+          <View style={styles.lostFeedbackHeartPixelStatic}>
+            <Ionicons name="heart" size={32} color="#ef4444" />
+          </View>
+        </View>
+        <TouchableOpacity
+          style={styles.lostFeedbackDismiss}
+          onPress={onDismiss}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.lostFeedbackDismissText}>OK</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 function ReelsScreen() {
+  const { remainingCodesByIndex, onWeGoPress: handleWeGoPress } = useTimer();
   const { height } = useWindowDimensions();
   const [activeIndex, setActiveIndex] = useState(0);
   const setActiveIndexRef = useRef(setActiveIndex);
   setActiveIndexRef.current = setActiveIndex;
-
-  const [remainingCodesByIndex, setRemainingCodesByIndex] = useState(() =>
-    REELS.map((r) => r.remainingCodes)
-  );
-
-  const [showTimerOverlay, setShowTimerOverlay] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(60);
-  const [code, setCode] = useState('');
-  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    if (!showTimerOverlay) return;
-    timerIntervalRef.current = setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev <= 1) {
-          if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-          setShowTimerOverlay(false);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-    };
-  }, [showTimerOverlay]);
-
-  const handleWeGoPress = useCallback((reelIndex: number) => {
-    const message =
-      'This action cannot be undone. Are you sure you want to continue?';
-    const onConfirm = () => {
-      setRemainingCodesByIndex((prev) => {
-        const next = [...prev];
-        next[reelIndex] = Math.max(0, next[reelIndex] - 1);
-        return next;
-      });
-      setCode(generateSixDigitCode());
-      setSecondsLeft(60);
-      setShowTimerOverlay(true);
-    };
-
-    if (Platform.OS === 'web') {
-      if (typeof window !== 'undefined' && window.confirm(message)) {
-        onConfirm();
-      }
-    } else {
-      Alert.alert('Confirm', message, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Confirm', onPress: onConfirm },
-      ]);
-    }
-  }, []);
 
   const onViewableItemsChanged = useCallback(
     (info: { viewableItems: ViewToken[] }) => {
@@ -214,6 +241,9 @@ function ReelsScreen() {
 
   const keyExtractor = useCallback((item: (typeof REELS)[0]) => item.id, []);
 
+  const { showTimerOverlay, code, secondsLeft, currentRouteName } = useTimer();
+  const showReelsFullOverlay = showTimerOverlay && currentRouteName === 'Reels';
+
   return (
     <View style={styles.reelsWrapper}>
       <FlatList
@@ -230,10 +260,10 @@ function ReelsScreen() {
         showsVerticalScrollIndicator={false}
         bounces={true}
       />
-      {showTimerOverlay && (
+      {showReelsFullOverlay && (
         <View
           style={[styles.timerOverlay, { height }]}
-          pointerEvents="box-none"
+          pointerEvents="auto"
         >
           <View style={styles.timerTint} />
           <View style={styles.timerContent}>
@@ -264,54 +294,151 @@ function LeaderboardPlaceholderScreen() {
 }
 
 export default function App() {
+  const [remainingCodesByIndex, setRemainingCodesByIndex] = useState(() =>
+    REELS.map((r) => r.remainingCodes)
+  );
+  const [showTimerOverlay, setShowTimerOverlay] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(10);
+  const [code, setCode] = useState('');
+  const [showLostFeedback, setShowLostFeedback] = useState(false);
+  const [currentRouteName, setCurrentRouteName] = useState('Map');
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reelIndexWhenTimerStartedRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!showTimerOverlay) return;
+    timerIntervalRef.current = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+          setShowTimerOverlay(false);
+          setCode('');
+          setRemainingCodesByIndex((prevCodes) => {
+            const next = [...prevCodes];
+            const idx = reelIndexWhenTimerStartedRef.current;
+            next[idx] = next[idx] + 1;
+            return next;
+          });
+          setShowLostFeedback(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
+  }, [showTimerOverlay]);
+
+  const handleWeGoPress = useCallback((reelIndex: number) => {
+    const message =
+      'This action cannot be undone. Are you sure you want to continue?';
+    const onConfirm = () => {
+      reelIndexWhenTimerStartedRef.current = reelIndex;
+      setRemainingCodesByIndex((prev) => {
+        const next = [...prev];
+        next[reelIndex] = Math.max(0, next[reelIndex] - 1);
+        return next;
+      });
+      setCode(generateSixDigitCode());
+      setSecondsLeft(10);
+      setShowTimerOverlay(true);
+    };
+
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm(message)) {
+        onConfirm();
+      }
+    } else {
+      Alert.alert('Confirm', message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Confirm', onPress: onConfirm },
+      ]);
+    }
+  }, []);
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <StatusBar style="dark" />
-        <NavigationContainer>
-        <Tab.Navigator
-          screenOptions={{
-            headerShown: false,
-            tabBarActiveTintColor: '#22c55e',
-            tabBarInactiveTintColor: '#374151',
-            tabBarStyle: { backgroundColor: '#fff' },
+        <TimerContext.Provider
+          value={{
+            remainingCodesByIndex,
+            onWeGoPress: handleWeGoPress,
+            showTimerOverlay,
+            code,
+            secondsLeft,
+            currentRouteName,
           }}
         >
-          <Tab.Screen
-            name="Map"
-            component={MapPlaceholderScreen}
-            options={{
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons name="map" size={size} color={color} />
-              ),
-            }}
-          />
-          <Tab.Screen
-            name="Reels"
-            component={ReelsScreen}
-            options={{
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons name="videocam" size={size} color={color} />
-              ),
-            }}
-          />
-          <Tab.Screen
-            name="Leaderboard"
-            component={LeaderboardPlaceholderScreen}
-            options={{
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons name="trophy" size={size} color={color} />
-              ),
-            }}
-          />
-        </Tab.Navigator>
-      </NavigationContainer>
-    </SafeAreaProvider>
+          <View style={styles.appRoot}>
+            <NavigationContainer
+              onStateChange={(state) => {
+                if (state?.routes?.[state.index]?.name) {
+                  setCurrentRouteName(state.routes[state.index].name);
+                }
+              }}
+            >
+              <Tab.Navigator
+                screenOptions={{
+                  headerShown: false,
+                  tabBarActiveTintColor: '#22c55e',
+                  tabBarInactiveTintColor: '#374151',
+                  tabBarStyle: { backgroundColor: '#fff' },
+                }}
+              >
+                <Tab.Screen
+                  name="Map"
+                  component={MapPlaceholderScreen}
+                  options={{
+                    tabBarIcon: ({ color, size }) => (
+                      <Ionicons name="map" size={size} color={color} />
+                    ),
+                  }}
+                />
+                <Tab.Screen
+                  name="Reels"
+                  component={ReelsScreen}
+                  options={{
+                    tabBarIcon: ({ color, size }) => (
+                      <Ionicons name="videocam" size={size} color={color} />
+                    ),
+                  }}
+                />
+                <Tab.Screen
+                  name="Leaderboard"
+                  component={LeaderboardPlaceholderScreen}
+                  options={{
+                    tabBarIcon: ({ color, size }) => (
+                      <Ionicons name="trophy" size={size} color={color} />
+                    ),
+                  }}
+                />
+              </Tab.Navigator>
+            </NavigationContainer>
+          {showTimerOverlay && currentRouteName !== 'Reels' && (
+            <View style={styles.timerBar} pointerEvents="box-none">
+              <Text style={styles.timerBarCode}>{code}</Text>
+              <Text style={styles.timerBarCountdown}>{formatTimer(secondsLeft)}</Text>
+            </View>
+          )}
+          {showLostFeedback && (
+            <LostFeedbackOverlay onDismiss={() => setShowLostFeedback(false)} />
+          )}
+          </View>
+        </TimerContext.Provider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
+  appRoot: {
+    flex: 1,
+  },
   reelsWrapper: {
     flex: 1,
   },
@@ -324,6 +451,41 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  timerOverlayGlobal: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  timerBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    paddingTop: 48,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+  },
+  timerBarCode: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#22c55e',
+    letterSpacing: 4,
+  },
+  timerBarCountdown: {
+    fontSize: 24,
+    fontWeight: '600',
+    color: '#22c55e',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 2,
+  },
   timerTint: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
@@ -335,14 +497,88 @@ const styles = StyleSheet.create({
   timerCode: {
     fontSize: 42,
     fontWeight: '700',
-    color: '#fff',
+    color: '#22c55e',
     letterSpacing: 8,
   },
   timerCountdown: {
-    fontSize: 24,
-    color: 'rgba(255,255,255,0.9)',
-    marginTop: 16,
+    fontSize: 28,
     fontWeight: '600',
+    color: '#22c55e',
+    marginTop: 16,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 4,
+  },
+  lostFeedbackOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  lostFeedbackCard: {
+    backgroundColor: '#2d3748',
+    borderRadius: 4,
+    padding: 24,
+    alignItems: 'center',
+    minWidth: 260,
+    borderWidth: 4,
+    borderColor: '#1a202c',
+  },
+  lostFeedbackPoints: {
+    fontSize: 16,
+    color: '#fff',
+    fontWeight: '700',
+    marginBottom: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  lostFeedbackHeartLabel: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.9)',
+    marginBottom: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  lostFeedbackHeartsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 20,
+  },
+  lostFeedbackHeartSlot: {
+    width: 36,
+    height: 36,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lostFeedbackHeartPixel: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 36,
+    height: 36,
+  },
+  lostFeedbackHeartPixelStatic: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lostFeedbackHeartBlack: {
+    position: 'absolute',
+  },
+  lostFeedbackDismiss: {
+    backgroundColor: '#22c55e',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 4,
+    borderWidth: 3,
+    borderColor: '#166534',
+  },
+  lostFeedbackDismissText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   reelContainer: {
     width: '100%',
