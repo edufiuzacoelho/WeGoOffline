@@ -1,15 +1,18 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useRef, useState, memo, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { TouchableOpacity, GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   View,
   Text,
   StyleSheet,
   FlatList,
   useWindowDimensions,
-  TouchableOpacity,
+  ViewToken,
+  Alert,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -24,6 +27,7 @@ const REELS = [
     handle: '@foodie_adventures',
     caption: 'Amazing latte art and cozy vibes! ☕',
     emoji: '🍔',
+    remainingCodes: 3,
   },
   {
     id: '2',
@@ -32,6 +36,7 @@ const REELS = [
     handle: '@taste_explorer',
     caption: 'Best view in town at golden hour 🌅',
     emoji: '☕',
+    remainingCodes: 5,
   },
   {
     id: '3',
@@ -40,19 +45,26 @@ const REELS = [
     handle: '@healthy_bites',
     caption: 'Fresh salads and smoothie bowls 🥗',
     emoji: '🥐',
+    remainingCodes: 4,
   },
 ];
 
-function ReelItem({
+const ReelItem = memo(function ReelItem({
   item,
   index,
   total,
   height,
+  isActive,
+  remainingCount,
+  onWeGoPress,
 }: {
   item: (typeof REELS)[0];
   index: number;
   total: number;
   height: number;
+  isActive: boolean;
+  remainingCount: number;
+  onWeGoPress?: (reelIndex: number) => void;
 }) {
   return (
     <View style={[styles.reelContainer, { height }]}>
@@ -62,7 +74,9 @@ function ReelItem({
       />
       <View style={styles.reelContent}>
         <View style={styles.counterBadge}>
-          <Text style={styles.counterText}>{`${index + 1}/${total}`}</Text>
+          <Text style={styles.counterText}>
+            Remaining codes: {remainingCount}
+          </Text>
         </View>
         <View style={styles.centerBlock}>
           <View style={styles.emojiCard}>
@@ -76,28 +90,117 @@ function ReelItem({
             <Text style={styles.captionHandle}>{item.handle}</Text>
             <Text style={styles.captionText}>{item.caption}</Text>
           </View>
-          <TouchableOpacity style={styles.weGoButton} activeOpacity={0.8}>
+          <TouchableOpacity
+            style={styles.weGoButton}
+            activeOpacity={0.8}
+            onPress={() => onWeGoPress?.(index)}
+          >
             <Text style={styles.weGoButtonText}>We Go</Text>
           </TouchableOpacity>
         </View>
       </View>
     </View>
   );
+});
+
+// When a reel hits this visibility, it becomes the "active" screen (for playback, etc.)
+const VIEWABILITY_CONFIG = {
+  itemVisiblePercentThreshold: 70,
+};
+
+function generateSixDigitCode(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-const SNAP_THRESHOLD = 0.3; // scroll past 30% → switch to next reel (never skip reels)
+function formatTimer(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 function ReelsScreen() {
   const { height } = useWindowDimensions();
-  const listRef = useRef<FlatList>(null);
-  const isProgrammaticScroll = useRef(false);
-  const currentReelIndex = useRef(0);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const setActiveIndexRef = useRef(setActiveIndex);
+  setActiveIndexRef.current = setActiveIndex;
+
+  const [remainingCodesByIndex, setRemainingCodesByIndex] = useState(() =>
+    REELS.map((r) => r.remainingCodes)
+  );
+
+  const [showTimerOverlay, setShowTimerOverlay] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(60);
+  const [code, setCode] = useState('');
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!showTimerOverlay) return;
+    timerIntervalRef.current = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+          setShowTimerOverlay(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
+  }, [showTimerOverlay]);
+
+  const handleWeGoPress = useCallback((reelIndex: number) => {
+    const message =
+      'This action cannot be undone. Are you sure you want to continue?';
+    const onConfirm = () => {
+      setRemainingCodesByIndex((prev) => {
+        const next = [...prev];
+        next[reelIndex] = Math.max(0, next[reelIndex] - 1);
+        return next;
+      });
+      setCode(generateSixDigitCode());
+      setSecondsLeft(60);
+      setShowTimerOverlay(true);
+    };
+
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm(message)) {
+        onConfirm();
+      }
+    } else {
+      Alert.alert('Confirm', message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Confirm', onPress: onConfirm },
+      ]);
+    }
+  }, []);
+
+  const onViewableItemsChanged = useCallback(
+    (info: { viewableItems: ViewToken[] }) => {
+      const first = info.viewableItems[0];
+      if (first?.index != null) setActiveIndexRef.current(first.index);
+    },
+    []
+  );
+  const viewabilityConfigRef = useRef(VIEWABILITY_CONFIG);
 
   const renderItem = useCallback(
     ({ item, index }: { item: (typeof REELS)[0]; index: number }) => (
-      <ReelItem item={item} index={index} total={REELS.length} height={height} />
+      <ReelItem
+        item={item}
+        index={index}
+        total={REELS.length}
+        height={height}
+        isActive={activeIndex === index}
+        remainingCount={remainingCodesByIndex[index]}
+        onWeGoPress={handleWeGoPress}
+      />
     ),
-    [height]
+    [height, activeIndex, remainingCodesByIndex, handleWeGoPress]
   );
 
   const getItemLayout = useCallback(
@@ -111,59 +214,34 @@ function ReelsScreen() {
 
   const keyExtractor = useCallback((item: (typeof REELS)[0]) => item.id, []);
 
-  const snapToReel = useCallback(
-    (contentOffsetY: number) => {
-      const index = Math.floor(contentOffsetY / height);
-      const fraction = (contentOffsetY % height) / height;
-      const naturalTarget = fraction > SNAP_THRESHOLD ? index + 1 : index;
-      const current = currentReelIndex.current;
-      const oneStep = Math.max(current - 1, Math.min(current + 1, naturalTarget));
-      const clamped = Math.min(
-        Math.max(0, oneStep),
-        REELS.length - 1
-      );
-      currentReelIndex.current = clamped;
-      const offset = clamped * height;
-      isProgrammaticScroll.current = true;
-      listRef.current?.scrollToOffset({ offset, animated: true });
-    },
-    [height]
-  );
-
-  const onScrollEndDrag = useCallback(
-    (e: { nativeEvent: { contentOffset: { y: number } } }) => {
-      if (isProgrammaticScroll.current) return;
-      snapToReel(e.nativeEvent.contentOffset.y);
-    },
-    [snapToReel]
-  );
-
-  const onMomentumScrollEnd = useCallback(
-    (e: { nativeEvent: { contentOffset: { y: number } } }) => {
-      if (isProgrammaticScroll.current) {
-        isProgrammaticScroll.current = false;
-        return;
-      }
-      snapToReel(e.nativeEvent.contentOffset.y);
-    },
-    [snapToReel]
-  );
-
   return (
     <View style={styles.reelsWrapper}>
       <FlatList
-        ref={listRef}
         data={REELS}
         renderItem={renderItem}
         keyExtractor={keyExtractor}
         getItemLayout={getItemLayout}
-        onScrollEndDrag={onScrollEndDrag}
-        onMomentumScrollEnd={onMomentumScrollEnd}
+        onViewableItemsChanged={onViewableItemsChanged}
+        viewabilityConfig={viewabilityConfigRef.current}
+        pagingEnabled
+        snapToInterval={height}
+        snapToAlignment="start"
         decelerationRate="fast"
         showsVerticalScrollIndicator={false}
         bounces={true}
-        scrollEventThrottle={16}
       />
+      {showTimerOverlay && (
+        <View
+          style={[styles.timerOverlay, { height }]}
+          pointerEvents="box-none"
+        >
+          <View style={styles.timerTint} />
+          <View style={styles.timerContent}>
+            <Text style={styles.timerCode}>{code}</Text>
+            <Text style={styles.timerCountdown}>{formatTimer(secondsLeft)}</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -187,9 +265,10 @@ function LeaderboardPlaceholderScreen() {
 
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <StatusBar style="dark" />
-      <NavigationContainer>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <StatusBar style="dark" />
+        <NavigationContainer>
         <Tab.Navigator
           screenOptions={{
             headerShown: false,
@@ -228,12 +307,42 @@ export default function App() {
         </Tab.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
   reelsWrapper: {
     flex: 1,
+  },
+  timerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  timerTint: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+  },
+  timerContent: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  timerCode: {
+    fontSize: 42,
+    fontWeight: '700',
+    color: '#fff',
+    letterSpacing: 8,
+  },
+  timerCountdown: {
+    fontSize: 24,
+    color: 'rgba(255,255,255,0.9)',
+    marginTop: 16,
+    fontWeight: '600',
   },
   reelContainer: {
     width: '100%',
